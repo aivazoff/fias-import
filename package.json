@@ -1,0 +1,12 @@
+{
+  "name": "fias-import",
+  "version": "1.0.0",
+  "main": "index.js",
+  "license": "MIT",
+  "dependencies": {
+    "node-stream-zip": "^1.15.0",
+    "pg": "^8.9.0",
+    "sax": "^1.2.4",
+    "xml2js": "^0.4.23"
+  }
+}
