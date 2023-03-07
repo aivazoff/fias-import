@@ -1,15 +1,13 @@
-const StreamZip = require('node-stream-zip');
-const xml2js = require('xml2js');
-const path = require('path');
-const fs = require('fs');
-const { Client } = require('pg');
-const { stdout, stderr } = require('process');
-const proc = require('child_process');
-const { Readable, Duplex } = require('stream');
-const sax = require("sax");
-const { async } = require('node-stream-zip');
+#!/usr/bin/env node --max-old-space-size=1500
 
-const client = new Client({
+const StreamZip = require('node-stream-zip');
+const readline = require('readline');
+const path = require('path');
+const sax = require("sax");
+const fs = require('fs');
+const pg = require('pg');
+
+const db = new pg.Client({
   host: 'localhost',
   port: 5432,
   database: 'fias',
@@ -19,29 +17,14 @@ const client = new Client({
   ssl: false
 });
 
-function runSqlFile(sqlFile) {
-  return new Promise((resolve, reject) => {
-
-    const child = proc.spawnSync(`docker exec -i fias-db psql -U fias -d fias -a -f /${sqlFile} > /dev/null`);
-
-    child.stdout.on('data', data => {
-      resolve();
-    });
-
-    child.stderr.on('data', data => {
-      reject(data.slice(0, 100));
-    });
-
-    child.on('error', (error) => {
-      reject(error.message.slice(0, 100));
-    });
-    
-    child.on('close', (code) => {
-      console.log(`child process exited with code ${code}`);
-    });
-
-  })
-}
+const excludes = [
+  'reestr_objects', 'addr_obj_division', 'change_history', 'normative_docs', 'normative_docs_kinds',
+  'normative_docs_types', 'operation_types', 'param', 'param_types', 'steads',
+  
+  // Tables not exists
+  'addr_obj_params', 'steads_params', 'houses_params', 'apartments_params', 
+  'rooms_params', 'carplaces_params'
+];
 
 function valueProcessor(value, name) {
   switch(name) {
@@ -55,152 +38,157 @@ function valueProcessor(value, name) {
   }
 }
 
+function consoleAlert(msg) {
+  readline.clearLine(process.stdout, 0);
+  readline.cursorTo(process.stdout, 0, null);
+  process.stdout.write(`\r${msg}`);
+}
+
+// БД ФИАС от 24.01.2023
 const zip = new StreamZip.async({
   file: path.join(__dirname, 'gar_xml.zip'),
   storeEntries: true
 });
 
-(async function(){
+const readFile = (f) => fs.readFileSync(path.join(__dirname, f)).toString('utf-8');
 
-  await client.connect();
+// addr_obj count: 1491891
 
-  const parser = new xml2js.Parser({
-    attrValueProcessors: [valueProcessor]
-  });
+(async function() {
 
-  async function getData(file) {
-    const data = await zip.entryData(file);
-    const xml = data.toString('utf-8');
-    let result = await parser.parseStringPromise(xml);
-    while(!Array.isArray(result)) {
-      result = Object.values(result).pop();
+  await db.connect();
+
+  const getPK = (function() {
+
+  const pkList = {};
+  
+    return async function(tbName) {
+
+      if(tbName in pkList) {
+        return pkList[tbName];
+      }
+
+      const result = await db.query(`
+        SELECT a.attname
+          FROM pg_index i
+          JOIN pg_attribute a 
+            ON a.attrelid = i.indrelid
+          AND a.attnum = ANY(i.indkey)
+        WHERE i.indrelid = '${tbName}'::regclass
+          AND i.indisprimary;
+      `);
+
+      pkList[tbName] = result.rowCount ? result.rows[0].attname : null;
+      return pkList[tbName];
     }
-    return result.map(it => it.$);
-  }
+
+  })();
 
   const entries = await zip.entries();
-  const tables = [];
+
+  db.query('BEGIN');
   
+  try {
+    await db.query(`DROP SCHEMA public CASCADE; CREATE SCHEMA public;`);
+    await db.query(readFile('structur.sql'));
+    await db.query('COMMIT');
+  } catch(e) {
+    await db.query('ROLLBACK');
+    throw e;
+  }
+
   for (const entry of Object.values(entries)) {
       const tableName = path.basename(entry.name).toLowerCase().replace(/^as_([a-z_]+)_\d+_.+$/, '$1');
 
-      if(!['addr_obj', 'carplaces', 'houses', 'adm_hierarchy', ''].includes(tableName)) {
+      if(excludes.includes(tableName)) {
         continue;
       }
 
-      if(!tables.includes(tableName)) {
-        tables.push(tableName);
-        // console.log(tableName);
-      }
+      const prefix = /^\d+\//.test(entry.name) ? entry.name.split('/')[0] + '_' : '';
+      const name = prefix + tableName;
+      const pk = await getPK(tableName);
 
-      if(/^\d+\//.test(entry.name)) {
-
-        const region = entry.name.split('/')[0];
-
-        const sqlFile = `data/${region}_${tableName}.sql`;
-        const sqlFilePath = path.join(__dirname, sqlFile);
-
-        if(fs.existsSync(sqlFilePath)) {
-          continue;
-        }
+      await new Promise(async (resulve, reject) => {
 
         const saxStream = sax.createStream(true, {});
 
-          saxStream.on("error", function (e) {
-            // unhandled errors will throw, since this is a proper node
-            // event emitter.
-            console.error("error!", e)
-            // clear the error
-            this._parser.error = null
-            this._parser.resume()
-          });
+        saxStream.on("error", function (e) {
+          // unhandled errors will throw, since this is a proper node
+          // event emitter.
+          console.error("error!", e)
+          // clear the error
+          this._parser.error = null
+          this._parser.resume()
+        });
 
-          saxStream.on("opentag", async function (node) {
-
-            if(!node.isSelfClosing) {
-              return;
-            }
-
-            const row = {};
-
-            for(const [name, value] of Object.entries(node.attributes)) {
-              row[name] = valueProcessor(value, name);
-            }
-
-            // console.log(row);
-
-            if(row['ISACTUAL'] === 'FALSE' || row['ISACTIVE'] === 'FALSE') {
-              return
-            }
-  
-            const cols = Object.keys(row).map(c => `"${c}"`).join(', ');
-            const values = Object.values(row).join(', ');
-            const query = `INSERT INTO "${tableName}" (${cols}) VALUES (${values})`;
-
-            try {
-              const result = await client.query(query);
-            } catch(e) {
-              console.error('Insert error: ' + e);
-            }
-
-          })
-
-          const stream = await zip.stream(entry);
-          stream.pipe(saxStream);
-
-          break;
-
-        const rows = await getData(entry.name);
-        fs.appendFileSync(sqlFilePath, 'BEGIN;\n');
         let queryList = [];
+        let i = 0;
 
-        for(const row of rows) {
+        async function insertRows() {
+          //db.query('BEGIN');
 
-          if(row['ISACTUAL'] === 'FALSE' || row['ISACTIVE'] === 'FALSE') {
-            continue
-          }
-
-          const cols = Object.keys(row).map(c => `"${c}"`).join(', ');
-          const values = Object.values(row).join(', ');
-          queryList.push(`INSERT INTO "${tableName}" (${cols}) VALUES (${values})`);
-
-          if(queryList.length === 1000) {
-            fs.appendFileSync(sqlFilePath, queryList.join(';\n') + ';\n');
+          try {
+            await db.query(queryList.join(';') + ';');
+            //await db.query('COMMIT');
+            consoleAlert(`Insert: ${name} (${i})`);
+          } catch(e) {
+            //await db.query('ROLLBACK');
+            console.error('\nInsert error: ' + e);
+            reject(e);
+          } finally {
             queryList = [];
           }
         }
 
-        queryList.push('COMMIT', '');
-        fs.appendFileSync(sqlFilePath, queryList.join(';\n'));
+        saxStream.on("opentag", async function (node) {
 
-        // await runSqlFile(sqlFile);
+          const attrs = Object.entries(node.attributes);
 
-        /* try {
-          const child = proc.spawnSync(`docker exec -i fias-db psql -U fias -d fias -a -f /${sqlFile}`, {
-            stdio: [ 'ignore', process.stdout, process.stderr ],
-          });
-  
-          if(child.error) {
-            throw child.error;
+          if(!node.isSelfClosing || !attrs.length) {
+            return;
           }
-  
-          if(child.stderr.length) {
-            throw new Error(child.stderr.toString('utf-8'));
+
+          const row = {};
+
+          for(const [name, value] of attrs) {
+            row[name] = valueProcessor(value, name);
+          }
+
+          if(row['ISACTUAL'] === 'FALSE' || row['ISACTIVE'] === 'FALSE') {
+            return
+          }
+
+          const cols = Object.keys(row).map(c => `"${c}"`).join(', ');
+          const values = Object.values(row).join(', ');
+          let query = `INSERT INTO "${tableName}" (${cols}) VALUES (${values})`;
+
+          if(pk) {
+            query += ` ON CONFLICT ("${pk}") DO NOTHING`;
+          }
+
+          queryList.push(query);
+
+          if(queryList.length === 10000) {
+            await insertRows();
+          }
+
+          ++i;
+
+        });
+
+        saxStream.on("end", async () => {
+          if(queryList.length > 0) {
+            await insertRows();
           }
           
-          console.log(`Loaded: ${region}_${tableName}`);
-        } catch(e) {
-          console.error(e);
-          process.exit();
-        } */
+          consoleAlert(`End: ${name} (${i} rows)\n`);
+          resulve();
+        });
 
-        console.log(`Converted: ${region}_${tableName}`);
-        
-      } else {
-        // console.log(tableName);
+        const stream = await zip.stream(entry);
+        stream.pipe(saxStream);
 
-        
-      }
+      });
   }
 
 
