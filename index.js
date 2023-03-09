@@ -118,12 +118,14 @@ const history = readFile(historyFile).split(/\r?\n/).filter(Boolean);
     }
   }
 
+  const exludes = ['house_types', 'houses'];
+
   const entries = await zip.entries();
 
   for (const entry of Object.values(entries)) {
       const tableName = path.basename(entry.name).toLowerCase().replace(/^as_([a-z_]+)_\d+_.+$/, '$1');
 
-      if(!(await tableExists(tableName)) || ['house_types', 'houses'].includes(tableName)) {
+      if(!(await tableExists(tableName)) || exludes.includes(tableName)) {
         continue;
       }
 
