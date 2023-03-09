@@ -49,6 +49,9 @@ const zip = new StreamZip.async({
 
 const readFile = (f) => fs.readFileSync(path.join(__dirname, f)).toString('utf-8');
 
+const historyFile = 'history.txt';
+const history = readFile(historyFile).split(/\r?\n/).filter(Boolean);
+
 // addr_obj count: 1491891
 
 (async function() {
@@ -120,7 +123,7 @@ const readFile = (f) => fs.readFileSync(path.join(__dirname, f)).toString('utf-8
   for (const entry of Object.values(entries)) {
       const tableName = path.basename(entry.name).toLowerCase().replace(/^as_([a-z_]+)_\d+_.+$/, '$1');
 
-      if(!(await tableExists(tableName))) {
+      if(!(await tableExists(tableName)) || ['house_types', 'houses'].includes(tableName)) {
         continue;
       }
 
@@ -128,6 +131,10 @@ const readFile = (f) => fs.readFileSync(path.join(__dirname, f)).toString('utf-8
       const prefix = region ? region + ':' : '';
       const name = prefix + tableName;
       const pk = await getPK(tableName);
+
+      if(history.includes(name)) {
+        continue;
+      }
 
       await new Promise(async (resulve, reject) => {
 
@@ -193,7 +200,7 @@ const readFile = (f) => fs.readFileSync(path.join(__dirname, f)).toString('utf-8
 
           queryList.push(query);
 
-          if(queryList.length === 10000) {
+          if(queryList.length === 100000) {
             await insertRows();
           }
 
@@ -207,6 +214,7 @@ const readFile = (f) => fs.readFileSync(path.join(__dirname, f)).toString('utf-8
           }
           
           consoleAlert(`End: ${name} (${i} rows)\n`);
+          fs.appendFileSync(historyFile, name + '\n');
           resulve();
         });
 
