@@ -1,11 +1,17 @@
 #!/usr/bin/env node --max-old-space-size=1500
 
+'use strict'
+
 const StreamZip = require('node-stream-zip');
 const readline = require('readline');
 const path = require('path');
 const sax = require("sax");
 const fs = require('fs');
 const pg = require('pg');
+
+function exit(code) {
+  process.exit(code);
+}
 
 const db = new pg.Client({
   host: 'localhost',
@@ -17,21 +23,12 @@ const db = new pg.Client({
   ssl: false
 });
 
-const excludes = [
-  'reestr_objects', 'addr_obj_division', 'change_history', 'normative_docs', 'normative_docs_kinds',
-  'normative_docs_types', 'operation_types', 'param', 'param_types', 'steads',
-  
-  // Tables not exists
-  'addr_obj_params', 'steads_params', 'houses_params', 'apartments_params', 
-  'rooms_params', 'carplaces_params'
-];
-
 function valueProcessor(value, name) {
   switch(name) {
-    case 'ISACTUAL':
-    case 'ISACTIVE':
+    case 'isactual':
+    case 'isactive':
       return Boolean(JSON.parse(value)) ? 'TRUE' : 'FALSE';
-    case 'LEVEL':
+    case 'level':
       return Number(value)
     default:
       return `'${value.replace(/'/g, "''")}'`;
@@ -73,9 +70,9 @@ const readFile = (f) => fs.readFileSync(path.join(__dirname, f)).toString('utf-8
           FROM pg_index i
           JOIN pg_attribute a 
             ON a.attrelid = i.indrelid
-          AND a.attnum = ANY(i.indkey)
-        WHERE i.indrelid = '${tbName}'::regclass
-          AND i.indisprimary;
+           AND a.attnum = ANY(i.indkey)
+         WHERE i.indrelid = '${tbName}'::regclass
+           AND i.indisprimary;
       `);
 
       pkList[tbName] = result.rowCount ? result.rows[0].attname : null;
@@ -84,33 +81,57 @@ const readFile = (f) => fs.readFileSync(path.join(__dirname, f)).toString('utf-8
 
   })();
 
-  const entries = await zip.entries();
-
-  db.query('BEGIN');
+  async function tableExists(tbName) {
+    const result = await db.query(`SELECT EXISTS (
+      SELECT FROM information_schema.tables 
+       WHERE table_schema = 'public'
+         AND table_name = $1
+    )`, [tbName]);
   
-  try {
-    await db.query(`DROP SCHEMA public CASCADE; CREATE SCHEMA public;`);
-    await db.query(readFile('structur.sql'));
-    await db.query('COMMIT');
-  } catch(e) {
-    await db.query('ROLLBACK');
-    throw e;
+    return result.rows[0].exists;
   }
+
+  async function columnExists(tbName, colName) {
+    const result = await db.query(`SELECT EXISTS (
+       SELECT FROM information_schema.columns 
+        WHERE table_schema = 'public'
+          AND table_name = $1
+          AND column_name = $2
+    )`, [tbName, colName]);
+  
+    return result.rows[0].exists;
+  }
+
+  async function dbClear() {
+    db.query('BEGIN');
+  
+    try {
+      await db.query(`DROP SCHEMA public CASCADE; CREATE SCHEMA public;`);
+      await db.query(readFile('structur.sql'));
+      await db.query('COMMIT');
+    } catch(e) {
+      await db.query('ROLLBACK');
+      throw e;
+    }
+  }
+
+  const entries = await zip.entries();
 
   for (const entry of Object.values(entries)) {
       const tableName = path.basename(entry.name).toLowerCase().replace(/^as_([a-z_]+)_\d+_.+$/, '$1');
 
-      if(excludes.includes(tableName)) {
+      if(!(await tableExists(tableName))) {
         continue;
       }
 
-      const prefix = /^\d+\//.test(entry.name) ? entry.name.split('/')[0] + '_' : '';
+      const region = /^\d+\//.test(entry.name) && entry.name.split('/')[0];
+      const prefix = region ? region + ':' : '';
       const name = prefix + tableName;
       const pk = await getPK(tableName);
 
       await new Promise(async (resulve, reject) => {
 
-        const saxStream = sax.createStream(true, {});
+        const saxStream = sax.createStream(true);
 
         saxStream.on("error", function (e) {
           // unhandled errors will throw, since this is a proper node
@@ -140,9 +161,9 @@ const readFile = (f) => fs.readFileSync(path.join(__dirname, f)).toString('utf-8
           }
         }
 
-        saxStream.on("opentag", async function (node) {
+        saxStream.on("opentag", async (node) => {
 
-          const attrs = Object.entries(node.attributes);
+          const attrs = Object.entries(node.attributes).map(([n ,v]) => [n.toLowerCase(), v]);
 
           if(!node.isSelfClosing || !attrs.length) {
             return;
@@ -154,8 +175,12 @@ const readFile = (f) => fs.readFileSync(path.join(__dirname, f)).toString('utf-8
             row[name] = valueProcessor(value, name);
           }
 
-          if(row['ISACTUAL'] === 'FALSE' || row['ISACTIVE'] === 'FALSE') {
+          if(row['isactual'] === 'FALSE' || row['isactive'] === 'FALSE') {
             return
+          }
+
+          if(region) {
+            row.region = region;
           }
 
           const cols = Object.keys(row).map(c => `"${c}"`).join(', ');
@@ -191,12 +216,7 @@ const readFile = (f) => fs.readFileSync(path.join(__dirname, f)).toString('utf-8
       });
   }
 
-
-  // client.close();
-
-  // Do not forget to close the file once you're done
-  // await zip.close();
+  client.close();
+  await zip.close();
 
 })()
-
-// console.log(fs.existsSync(path.join()))
