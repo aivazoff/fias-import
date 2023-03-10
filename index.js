@@ -52,8 +52,6 @@ const readFile = (f) => fs.readFileSync(path.join(__dirname, f)).toString('utf-8
 const historyFile = 'history.txt';
 const history = readFile(historyFile).split(/\r?\n/).filter(Boolean);
 
-// addr_obj count: 1491891
-// addr_obj_pkey
 
 (async function() {
 
