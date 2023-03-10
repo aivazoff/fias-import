@@ -53,6 +53,7 @@ const historyFile = 'history.txt';
 const history = readFile(historyFile).split(/\r?\n/).filter(Boolean);
 
 // addr_obj count: 1491891
+// addr_obj_pkey
 
 (async function() {
 
@@ -160,7 +161,7 @@ const history = readFile(historyFile).split(/\r?\n/).filter(Boolean);
           try {
             await db.query(queryList.join(';') + ';');
             //await db.query('COMMIT');
-            consoleAlert(`Insert: ${name} (${i})`);
+            consoleAlert(`Insert: ${name} (${i} rows)`);
           } catch(e) {
             //await db.query('ROLLBACK');
             console.error('\nInsert error: ' + e);
@@ -185,7 +186,7 @@ const history = readFile(historyFile).split(/\r?\n/).filter(Boolean);
           }
 
           if(row['isactual'] === 'FALSE' || row['isactive'] === 'FALSE') {
-            return
+            // return
           }
 
           if(region) {
@@ -197,12 +198,15 @@ const history = readFile(historyFile).split(/\r?\n/).filter(Boolean);
           let query = `INSERT INTO "${tableName}" (${cols}) VALUES (${values})`;
 
           if(pk) {
-            query += ` ON CONFLICT ("${pk}") DO NOTHING`;
+            // query += ` ON CONFLICT ("${pk}") DO NOTHING`;
+            const upCols = Object.keys(row).filter(c => c !== pk);
+            const cols = upCols.map(c => `"${c}"=EXCLUDED."${c}"`).join(', ');
+            query += ` ON CONFLICT ("${pk}") DO UPDATE SET ${cols}`;
           }
 
           queryList.push(query);
 
-          if(queryList.length === 100000) {
+          if(queryList.length === 20000) {
             await insertRows();
           }
 
@@ -226,7 +230,7 @@ const history = readFile(historyFile).split(/\r?\n/).filter(Boolean);
       });
   }
 
-  client.close();
+  db.end();
   await zip.close();
 
 })()
