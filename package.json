@@ -3,6 +3,11 @@
   "version": "1.0.0",
   "main": "index.js",
   "license": "MIT",
+  "author" : {
+    "name": "Arthur Aivazov",
+    "email": "arthur.aivazoff@gmail.com",
+    "url": "https://github.com/aivazoff/"
+  },  
   "scripts": {
     "fias-import": "node --max-old-space-size=1024 index.js"
   },
